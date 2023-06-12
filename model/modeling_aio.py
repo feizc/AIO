@@ -9,10 +9,11 @@ import utils.data as data
 
 class AioForConditionalGeneration(PreTrainedModel): 
     def __init__(self, config): 
+        super(AioForConditionalGeneration, self).__init__(config)
         if config.vision_model_type == 'imagebind':
             from imagebind import imagebind_model
             self.vision_model = imagebind_model.imagebind_huge(pretrained=True) 
-        else:
+        else: 
             self.vision_model = None 
         self.vision_model.eval() 
 
@@ -47,6 +48,7 @@ class AioForConditionalGeneration(PreTrainedModel):
         encoder_config.encoder_width = vision_width
         # insert cross-attention layer every other block
         encoder_config.add_cross_attention = True
+        encoder_config.is_decoder = True
         encoder_config.cross_attention_freq = cross_attention_freq
         encoder_config.query_length = num_query_token
         Qformer = BertLMHeadModel.from_pretrained(
