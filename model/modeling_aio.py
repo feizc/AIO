@@ -1,10 +1,27 @@
 import torch.nn as nn 
 import torch 
+from torch.nn import CrossEntropyLoss 
 from transformers.modeling_utils import PreTrainedModel
-from transformers import BertConfig, BertLMHeadModel 
+from transformers.modeling_outputs import CausalLMOutputWithPast 
 from transformers import AutoModelForCausalLM 
 from imagebind.imagebind_model import ModalityType 
-import utils.data as data 
+
+from typing import Any, Optional, Tuple, Union
+from .qformer import BertConfig, BertLMHeadModel
+
+
+
+def get_media_indices(text_list): 
+    if isinstance(text_list, torch.Tensor):
+        my_list = text_list.cpu().tolist()
+    result = []
+    for i in range(len(my_list)):
+        if i == 0 and my_list[i] < 0:
+            result.append(i)
+        elif my_list[i] != my_list[i - 1] and my_list[i] < 0:
+            result.append(i)
+    return result
+
 
 
 class AioForConditionalGeneration(PreTrainedModel): 
@@ -21,11 +38,20 @@ class AioForConditionalGeneration(PreTrainedModel):
         self.Qformer, self.query_tokens = self.init_Qformer(
             config.num_query_token, config.vision_hidden_size
         )
+        if not config.qformer_text_input: 
+            self.Qformer.bert.embeddings.word_embeddings = None
+            self.Qformer.bert.embeddings.position_embeddings = None
+            for layer in self.Qformer.bert.encoder.layer:
+                layer.output = None
+                layer.intermediate = None 
+        else:
+            self.Qformer.resize_token_embeddings(config.text_vocab)
         self.Qformer.cls = None 
 
         self.language_input_proj = nn.Linear(config.vision_hidden_size, config.text_hidden_size)
-        self.language_output_proj = nn.Linear(config.q_former_hidden_size, config.text_hidden_size)
+        self.language_output_proj = nn.Linear(config.q_former_hidden_size + config.text_hidden_size, config.text_hidden_size)
         self.config = config 
+
     
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
@@ -63,31 +89,119 @@ class AioForConditionalGeneration(PreTrainedModel):
     def forward(
         self,
         vision_inputs,
-        input_ids: torch.FloatTensor,
+        input_ids: torch.FloatTensor, 
+        attention_mask,
+        return_dict: Optional[bool] = None, 
+        labels = None, 
     ): 
         # get text embedding
         text_tokens_ = input_ids.clone()
         batch_size = input_ids.shape[0] 
 
+        media_token_indices = [
+            # [:-1] since we would not use the last token for embedding
+            get_media_indices(text_tokens_[i][:-1])
+            for i in range(batch_size)
+        ]
+
         text_tokens_[text_tokens_ < 0] = 1  # Not used
         # text_tokens = text_tokens_[:, :-1].contiguous()
-        text_embeds = self.get_input_embeddings()(text_tokens_) 
+        text_embeds = self.get_input_embeddings()(text_tokens_)  # (bsz, seq_len, text_hidden)
 
         if hasattr(self.language_model, 'transformer') and hasattr(self.language_model.transformer, 'word_embeddings_layernorm'):
             text_embeds = self.language_model.transformer.word_embeddings_layernorm(text_embeds)
 
-        with torch.no_grad():
+        with torch.no_grad(): 
+            # (bsz, image_hidden)
             image_embeds = self.vision_model({ModalityType.VISION: vision_inputs})[ModalityType.VISION] 
         
+        image_embeds = image_embeds.unsqueeze(1) # (bsz, image_seq_len, image_hidden)
         image_attention_mask = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
         query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
 
-        query_features = self.abstractor(
-            query_embeds=query_tokens,
-            encoder_hidden_states=image_embeds,
-            encoder_attention_mask=image_attention_mask,
-        )["last_hidden_state"]
+        llm_input_image_embeds = self.language_input_proj(image_embeds) 
+
+        image_seq_length = 1
+
+        text_chunk_embeds = []
+        for b in range(batch_size):
+            start = 0
+            result = []
+            if len(media_token_indices[b]) > 0:
+                for i, pos in enumerate(media_token_indices[b]):
+                    if pos > start:
+                        result.append(text_embeds[b, start:pos])
+                    result.append(llm_input_image_embeds[b, ])
+                    start = pos + image_seq_length
+            if start < text_embeds.shape[1]:
+                result.append(text_embeds[b, start:]) 
+            text_chunk_embeds.append(torch.cat(result, dim=0))
+
+        # Actual Input Embeddings (bsz, new_seq_len, text_hidden)
+        input_embeds = torch.stack(text_chunk_embeds, dim=0)
         
+        outputs = self.language_model.model(
+            inputs_embeds=input_embeds, 
+            attention_mask=attention_mask,
+            return_dict=return_dict,
+        )
+        
+        hidden_states = outputs[0] # (bsz, seq_len, text_hidden)
+
+        if self.config.qformer_text_input: 
+            """
+            use question for textual input 
+            """
+            query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(vision_inputs.device)
+            Qformer_atts = torch.cat([query_atts, attention_mask],dim=1)
+            query_output = self.Qformer.bert(
+                input_ids[:, 1:],
+                attention_mask=Qformer_atts[:, 1:],
+                query_embeds=query_tokens,
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_attention_mask,
+                return_dict=True,
+            )
+        else: 
+            """
+            for image captioning evaluation
+            """
+            query_output = self.Qformer.bert(
+                query_embeds=query_tokens,
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_attention_mask,
+                return_dict=True,
+            ) 
+
+        query_output = query_output.last_hidden_state[:,:query_tokens.size(1),:] #(bsz, num_query, q_hidden)
+        query_output = torch.mean(query_output, dim=1, keepdim=True) 
+        query_output = query_output.repeat(1, hidden_states.size(1), 1) 
+
+        # recall image information 
+        output = self.language_output_proj(torch.cat([hidden_states, query_output], dim=2))
+        logits = self.language_model.lm_head(output) 
+
+        loss = None 
+        if labels is not None: 
+            shift_logits = logits[..., 1:-1, :].contiguous()
+            shift_labels = labels[..., 2:].contiguous()
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
         
 
 
