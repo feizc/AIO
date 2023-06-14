@@ -1,3 +1,5 @@
+import torch 
+import random 
 from PIL import Image, ImageFile 
 from torch.utils.data import Dataset
 import requests 
@@ -14,12 +16,13 @@ Image.MAX_IMAGE_PIXELS = None
 
 
 class LAION400MDataset(Dataset): 
-    def __init__(self, file_path, tokenizer, prompt_path='./data/prompts.txt'): 
+    def __init__(self, file_path, tokenizer, config, prompt_path='./data/prompts.txt'): 
         self.file_path = file_path 
         self.file = open(file_path, 'r', encoding='utf-8') 
         with open(prompt_path, 'r') as f: 
             self.prompts_list = f.readlines() 
         self.tokenizer = tokenizer 
+        self.max_text_length = config.max_text_length
 
         self.image_transform = transforms.Compose(
             [
@@ -36,7 +39,32 @@ class LAION400MDataset(Dataset):
         )
     
     def __len__(self): 
-        return 100
+        return 100 
+    
+    def pad_tokens(self, text): 
+        prompt = random.choice(self.prompts_list) 
+        prompt_tokens = self.tokenizer.encode('###Human: ' + prompt + ' ###Assistant:  ') 
+        text_tokens = self.tokenizer.encode(text) 
+        tokens = torch.tensor([-1] + prompt_tokens + text_tokens, dtype=torch.int64) # add image placeholder 
+        prompt_length = len(prompt_tokens) 
+
+        padding = self.max_text_length - tokens.shape
+        if padding > 0:
+            tokens = torch.cat((tokens, torch.zeros(padding, dtype=torch.int64) - 1)) 
+        else:
+            tokens = tokens[:self.max_text_length] 
+        
+        no_padding_mask = tokens.ge(0)  # mask is zero where we out of sequence 
+        no_padding_mask = no_padding_mask.float() 
+
+        non_media_mask = tokens.le(-1) 
+        non_media_mask = non_media_mask.float() 
+
+        prompt_mask = torch.cat((torch.ones(1 + prompt_length), torch.zeros(self.max_text_length - 1 - prompt_length)), dim=0) 
+        prompt_mask = prompt_mask.float()
+
+        return tokens, prompt_length, no_padding_mask, non_media_mask, prompt_mask
+        
     
     def __getitem__(self, index): 
         data = self.file.readline() 
@@ -45,6 +73,8 @@ class LAION400MDataset(Dataset):
             data = self.file.readline() 
         
         url, text = data.strip().split('\t') 
+        
+        # image
         if 'http' in url:
             domain = urlparse(url).netloc
             url = url.replace(domain, 'p.vip.sankuai.com')+'@384w'
@@ -59,11 +89,17 @@ class LAION400MDataset(Dataset):
             img = Image.open(str(url)) 
 
         img = img.convert("RGB") 
-        img = self.image_transform(img)
+        img = self.image_transform(img) 
+
+        # text 
+        tokens, prompt_length, no_padding_mask, non_media_mask, prompt_mask = self.pad_tokens(text) 
+        prompt_length = torch.Tensor(prompt_length).long()
+
         return {
-            "input_ids"
-            "prompt_length"
-            "no_padding_mask"
-            "non_media_mask"
-            "prompt_mask"
+            "vision_inputs": img, 
+            "input_ids": tokens,
+            "prompt_length": prompt_length,
+            "no_padding_mask": no_padding_mask,
+            "non_media_mask": non_media_mask,
+            "prompt_mask": prompt_mask,
         }
