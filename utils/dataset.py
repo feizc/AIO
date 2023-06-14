@@ -48,15 +48,18 @@ class LAION400MDataset(Dataset):
         tokens = torch.tensor([-1] + prompt_tokens + text_tokens, dtype=torch.int64) # add image placeholder 
         prompt_length = len(prompt_tokens) 
 
-        padding = self.max_text_length - tokens.shape
+        padding = self.max_text_length - tokens.shape[0]
         if padding > 0:
             tokens = torch.cat((tokens, torch.zeros(padding, dtype=torch.int64) - 1)) 
         else:
             tokens = tokens[:self.max_text_length] 
         
         no_padding_mask = tokens.ge(0)  # mask is zero where we out of sequence 
+        tokens[~no_padding_mask] = 0
+        tokens[0] = -1
+        no_padding_mask[0] = 1
         no_padding_mask = no_padding_mask.float() 
-
+        
         non_media_mask = tokens.le(-1) 
         non_media_mask = non_media_mask.float() 
 
@@ -93,13 +96,22 @@ class LAION400MDataset(Dataset):
 
         # text 
         tokens, prompt_length, no_padding_mask, non_media_mask, prompt_mask = self.pad_tokens(text) 
-        prompt_length = torch.Tensor(prompt_length).long()
+        prompt_length = torch.Tensor([prompt_length]).long()
 
         return {
             "vision_inputs": img, 
             "input_ids": tokens,
-            "prompt_length": prompt_length,
+            # "prompt_length": prompt_length,
             "no_padding_mask": no_padding_mask,
             "non_media_mask": non_media_mask,
             "prompt_mask": prompt_mask,
         }
+
+
+def build_train_valid_datasets(input_file, tokenizer, config, data_type='LAION'): 
+    assert len(input_file) == 2 
+    if data_type == 'LAION': 
+        train_dataset = LAION400MDataset(file_path=input_file[0], tokenizer=tokenizer, config=config) 
+        valid_dataset = LAION400MDataset(file_path=input_file[1], tokenizer=tokenizer, config=config) 
+    return (train_dataset, valid_dataset) 
+

@@ -23,7 +23,6 @@ def get_media_indices(text_list):
     return result
 
 
-
 class AioForConditionalGeneration(PreTrainedModel): 
     def __init__(self, config): 
         super(AioForConditionalGeneration, self).__init__(config)
@@ -36,7 +35,7 @@ class AioForConditionalGeneration(PreTrainedModel):
 
         self.language_model = AutoModelForCausalLM.from_pretrained(config.language_model_path)
         self.Qformer, self.query_tokens = self.init_Qformer(
-            config.num_query_token, config.vision_hidden_size
+            config.num_query_token, config.vision_hidden_size, config,
         )
         if not config.qformer_text_input: 
             self.Qformer.bert.embeddings.word_embeddings = None
@@ -69,8 +68,8 @@ class AioForConditionalGeneration(PreTrainedModel):
         return self.language_model.get_decoder()
 
     @classmethod
-    def init_Qformer(cls, num_query_token, vision_width, cross_attention_freq=2):
-        encoder_config = BertConfig.from_pretrained("ckpt/bert")
+    def init_Qformer(cls, num_query_token, vision_width, config, cross_attention_freq=2):
+        encoder_config = BertConfig.from_pretrained(config.q_former_path)
         encoder_config.encoder_width = vision_width
         # insert cross-attention layer every other block
         encoder_config.add_cross_attention = True
@@ -78,7 +77,7 @@ class AioForConditionalGeneration(PreTrainedModel):
         encoder_config.cross_attention_freq = cross_attention_freq
         encoder_config.query_length = num_query_token
         Qformer = BertLMHeadModel.from_pretrained(
-            "ckpt/bert", config=encoder_config
+            config.q_former_path, config=encoder_config
         )
         query_tokens = nn.Parameter(
             torch.zeros(1, num_query_token, encoder_config.hidden_size)
@@ -90,7 +89,9 @@ class AioForConditionalGeneration(PreTrainedModel):
         self,
         vision_inputs,
         input_ids: torch.FloatTensor, 
-        attention_mask,
+        no_padding_mask = None,
+        non_media_mask = None,
+        prompt_mask = None,
         return_dict: Optional[bool] = None, 
         labels = None, 
     ): 
@@ -142,7 +143,7 @@ class AioForConditionalGeneration(PreTrainedModel):
         
         outputs = self.language_model.model(
             inputs_embeds=input_embeds, 
-            attention_mask=attention_mask,
+            attention_mask=no_padding_mask,
             return_dict=return_dict,
         )
         
@@ -153,9 +154,11 @@ class AioForConditionalGeneration(PreTrainedModel):
             use question for textual input 
             """
             query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(vision_inputs.device)
-            Qformer_atts = torch.cat([query_atts, attention_mask],dim=1)
+            Qformer_atts = torch.cat([query_atts, prompt_mask],dim=1) 
+            # only prompt information is used to weight image information
+            context_input_ids = input_ids * prompt_mask
             query_output = self.Qformer.bert(
-                input_ids[:, 1:],
+                context_input_ids[:, 1:],
                 attention_mask=Qformer_atts[:, 1:],
                 query_embeds=query_tokens,
                 encoder_hidden_states=image_embeds,
@@ -182,11 +185,17 @@ class AioForConditionalGeneration(PreTrainedModel):
         logits = self.language_model.lm_head(output) 
 
         loss = None 
+        if non_media_mask is not None: 
+            no_padding_mask = no_padding_mask * (1 - non_media_mask) 
+        if prompt_mask is not None: 
+            no_padding_mask = no_padding_mask * (1 - prompt_mask) 
+        labels[no_padding_mask != 1] = -100
+
         if labels is not None: 
             shift_logits = logits[..., 1:-1, :].contiguous()
             shift_labels = labels[..., 2:].contiguous()
             # Flatten the tokens
-            loss_fct = CrossEntropyLoss()
+            loss_fct = CrossEntropyLoss(ignore_index=-100)
             shift_logits = shift_logits.view(-1, self.config.vocab_size)
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism

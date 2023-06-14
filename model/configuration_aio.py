@@ -12,7 +12,9 @@ class AioConfig(PretrainedConfig):
         vision_hidden_size=1024,
         text_hidden_size=5120, 
         text_vocab=32000,
+        max_text_length=64,
         language_model_path='./ckpt/llama', 
+        q_former_path='./ckpt/bert'
     ): 
         self.vision_model_type = vision_model_type 
         self.q_former_hidden_size = q_former_hidden_size 
@@ -22,6 +24,8 @@ class AioConfig(PretrainedConfig):
         self.language_model_path = language_model_path 
         self.num_query_token = num_query_token
         self.text_vocab = text_vocab
+        self.max_text_length=max_text_length 
+        self.q_former_path = q_former_path
 
     
 
