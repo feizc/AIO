@@ -81,6 +81,8 @@ def main():
     parser.add_argument('--use-lora', type=bool, default=False, help='LORA.')
     parser.add_argument('--save-path', type=str, default='output',
                     help='Output directory to save checkpoints to.')
+    parser.add_argument('--local_rank', type=int, default=-1,
+                    help='Local rank')
     args = parser.parse_args() 
 
     config = AioConfig(language_model_path=args.language_model_path) 

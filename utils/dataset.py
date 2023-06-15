@@ -58,13 +58,13 @@ class LAION400MDataset(Dataset):
         tokens[~no_padding_mask] = 0
         tokens[0] = -1
         no_padding_mask[0] = 1
-        no_padding_mask = no_padding_mask.float() 
+        no_padding_mask = no_padding_mask.long()
         
         non_media_mask = tokens.le(-1) 
-        non_media_mask = non_media_mask.float() 
+        non_media_mask = non_media_mask.long()
 
         prompt_mask = torch.cat((torch.ones(1 + prompt_length), torch.zeros(self.max_text_length - 1 - prompt_length)), dim=0) 
-        prompt_mask = prompt_mask.float()
+        prompt_mask = prompt_mask.long()
 
         return tokens, prompt_length, no_padding_mask, non_media_mask, prompt_mask
         

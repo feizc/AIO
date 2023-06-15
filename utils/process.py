@@ -8,7 +8,7 @@ def batchify(batch):
     if all([img is None for img in image]):
         image = None
     else:
-        image = torch.cat([img for img in image if img is not None], dim=0)
+        image = torch.stack([img for img in image if img is not None], dim=0)
     
     text = torch.stack([torch.LongTensor(data['input_ids']) for data in batch], dim=0)
     no_padding_mask = torch.stack([torch.LongTensor(data['no_padding_mask']) for data in batch], dim=0)
