@@ -85,6 +85,7 @@ class AioForConditionalGeneration(PreTrainedModel):
         query_tokens.data.normal_(mean=0.0, std=encoder_config.initializer_range)
         return Qformer, query_tokens 
     
+
     def forward(
         self,
         vision_inputs,
@@ -196,7 +197,7 @@ class AioForConditionalGeneration(PreTrainedModel):
             shift_labels = labels[..., 2:].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss(ignore_index=-100)
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_logits = shift_logits.view(-1, self.config.text_vocab)
             shift_labels = shift_labels.view(-1)
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
@@ -210,10 +211,133 @@ class AioForConditionalGeneration(PreTrainedModel):
             attentions=outputs.attentions,
         )
 
+    def prepare_inputs_for_generation(
+        self, 
+        input_ids, 
+        pixel_values=None, 
+        past_key_values=None, 
+        attention_mask=None, 
+        **model_kwargs,
+    ):
+        input_shape = input_ids.shape
+        if attention_mask is None:
+            attention_mask = input_ids.new_ones(input_shape)
 
+        return {
+            "input_ids": input_ids,
+            "pixel_values": pixel_values,
+            "attention_mask": attention_mask,
+            "is_decoder": True,
+        }
+
+
+    @torch.no_grad()
+    def generate(
+        self,
+        pixel_values=None,
+        input_ids=None,
+        attention_mask=None,
+        isdecoder=True,
+        **generate_kwargs,
+    ):
+        """
+        Overrides `generate` function to be able to use the model as a conditional generator.
+        """
+        if attention_mask is None: 
+            attention_mask = input_ids.new_ones(*input_ids.shape) 
         
+        batch_size = input_ids.size(0)
+        media_token_indices = [get_media_indices(input_ids[i]) for i in range(batch_size)] 
+        input_ids = input_ids.clone()  # prevent inplace modify
+        input_ids[input_ids < 0] = 0  # Not used
 
+        # get text embedding
+        text_embeds = self.get_input_embeddings()(input_ids)
+        if hasattr(self.language_model, 'transformer') and hasattr(self.language_model.transformer, 'word_embeddings_layernorm'):
+            text_embeds = self.language_model.transformer.word_embeddings_layernorm(text_embeds) 
+        
+        # get visual embedding
+        if pixel_values is not None: 
+            pixel_values = pixel_values.to(input_ids.device) 
 
+        with torch.no_grad(): 
+            # (bsz, image_hidden)
+            image_embeds = self.vision_model({ModalityType.VISION: pixel_values})[ModalityType.VISION] 
+        
+        image_embeds = image_embeds.unsqueeze(1) # (bsz, image_seq_len, image_hidden)
+
+        image_attention_mask = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
+        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+
+        llm_input_image_embeds = self.language_input_proj(image_embeds) 
+
+        image_seq_length = 1
+
+        text_chunk_embeds = []
+        for b in range(batch_size):
+            start = 0
+            result = []
+            if len(media_token_indices[b]) > 0:
+                for i, pos in enumerate(media_token_indices[b]):
+                    if pos > start:
+                        result.append(text_embeds[b, start:pos])
+                    result.append(llm_input_image_embeds[b, ])
+                    start = pos + image_seq_length
+            if start < text_embeds.shape[1]:
+                result.append(text_embeds[b, start:]) 
+            text_chunk_embeds.append(torch.cat(result, dim=0))
+
+        # Actual Input Embeddings (bsz, new_seq_len, text_hidden)
+        input_embeds = torch.stack(text_chunk_embeds, dim=0) 
+        outputs = self.language_model.model(
+            inputs_embeds=input_embeds, 
+            attention_mask=attention_mask,
+            return_dict=True,
+        )
+        hidden_states = outputs[0] # (bsz, seq_len, text_hidden)
+
+        if self.config.qformer_text_input: 
+            """
+            use question for textual input 
+            """
+            query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(pixel_values.device)
+            Qformer_atts = torch.cat([query_atts, attention_mask],dim=1) 
+            # only prompt information is used to weight image information
+            context_input_ids = input_ids * attention_mask 
+            query_output = self.Qformer.bert(
+                context_input_ids[:, 1:],
+                attention_mask=Qformer_atts[:, 1:],
+                query_embeds=query_tokens,
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_attention_mask,
+                return_dict=True,
+            )
+        else: 
+            """
+            for image captioning evaluation
+            """
+            query_output = self.Qformer.bert(
+                query_embeds=query_tokens,
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_attention_mask,
+                return_dict=True,
+            ) 
+
+        query_output = query_output.last_hidden_state[:,:query_tokens.size(1),:] #(bsz, num_query, q_hidden)
+        query_output = torch.mean(query_output, dim=1, keepdim=True) 
+        query_output = query_output.repeat(1, hidden_states.size(1), 1) 
+
+        # recall image information 
+        output = self.language_output_proj(torch.cat([hidden_states, query_output], dim=2))
+        logits = self.language_model.lm_head(output) 
+
+        # To be updated according to: 
+        # https://github.com/huggingface/transformers/blob/v4.30.0/src/transformers/generation/utils.py#L1149
+        next_token_logits = logits[:, -1, :]
+        next_tokens = torch.argmax(next_token_logits, dim=-1) 
+        input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1) 
+
+        return input_ids 
 
 
 
