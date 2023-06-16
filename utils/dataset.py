@@ -8,6 +8,7 @@ from urllib3.util.retry import Retry
 from io import BytesIO
 from urllib.parse import urlparse
 from torchvision import transforms
+from .process import image_transforms_build
 
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -24,19 +25,7 @@ class LAION400MDataset(Dataset):
         self.tokenizer = tokenizer 
         self.max_text_length = config.max_text_length
 
-        self.image_transform = transforms.Compose(
-            [
-                transforms.Resize(
-                    224, interpolation=transforms.InterpolationMode.BICUBIC
-                ),
-                transforms.CenterCrop(224),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=(0.48145466, 0.4578275, 0.40821073),
-                    std=(0.26862954, 0.26130258, 0.27577711),
-                ),
-            ]
-        )
+        self.image_transform = image_transforms_build(224)
     
     def __len__(self): 
         return 100 
