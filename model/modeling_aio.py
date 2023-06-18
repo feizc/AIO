@@ -331,6 +331,7 @@ class AioForConditionalGeneration(PreTrainedModel):
         output = self.language_output_proj(torch.cat([hidden_states, query_output], dim=2))
         logits = self.language_model.lm_head(output) 
 
+        """
         # To be updated according to: 
         # https://github.com/huggingface/transformers/blob/v4.30.0/src/transformers/generation/utils.py#L1149
         next_token_logits = logits[:, -1, :]
@@ -338,6 +339,10 @@ class AioForConditionalGeneration(PreTrainedModel):
         input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1) 
 
         return input_ids 
+        """ 
+        return logits 
+
+        
 
 
 
