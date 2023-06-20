@@ -2,7 +2,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 
 class AioConfig(PretrainedConfig): 
-    model_type = "aio_config" 
+    # model_type = "aio_config" 
     def __init__(
         self, 
         vision_model_type='imagebind', # clip, vit
@@ -14,8 +14,10 @@ class AioConfig(PretrainedConfig):
         text_vocab=32000,
         max_text_length=64,
         language_model_path='./ckpt/llama', 
-        q_former_path='./ckpt/bert'
-    ): 
+        q_former_path='./ckpt/bert',
+        **kwargs
+    ):  
+        super().__init__(**kwargs)
         self.vision_model_type = vision_model_type 
         self.q_former_hidden_size = q_former_hidden_size 
         self.qformer_text_input = qformer_text_input

@@ -22,8 +22,10 @@ def get_media_indices(text_list):
             result.append(i)
     return result
 
-
+from .configuration_aio import AioConfig 
 class AioForConditionalGeneration(PreTrainedModel): 
+    config_class = AioConfig
+
     def __init__(self, config): 
         super(AioForConditionalGeneration, self).__init__(config)
         if config.vision_model_type == 'imagebind':

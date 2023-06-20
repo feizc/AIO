@@ -6,7 +6,7 @@ import utils.data as data
 from model import AioForConditionalGeneration 
 from PIL import Image 
 from utils import image_transforms_build 
-
+from llama import LlamaTokenizer
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -42,14 +42,17 @@ def top_filtering(logits, top_k=0, top_p=0.0, threshold=-float('Inf'), filter_va
 
 def get_model_and_tokenizer(pretrained_ckpt):
     model = AioForConditionalGeneration.from_pretrained(pretrained_ckpt,)
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_ckpt,) 
+    #tokenizer = AutoTokenizer.from_pretrained(pretrained_ckpt,) 
+    tokenizer = LlamaTokenizer.from_pretrained('./ckpt/llama', use_fast=False) 
+    tokenizer.pad_token='[PAD]'
     return model, tokenizer 
 
 
-def generate(input_texts, image_lists, model, tokenizer, max_length, min_length, temperature, **generate_kwargs): 
-    img = Image.open(image_lists).convert('RGB') 
+def generate(input_texts, image_lists, model, tokenizer, max_length, min_length, temperature, top_k, no_sample, top_p, batch_size): 
+    img = Image.open(image_lists[0]).convert('RGB') 
     img = image_transforms_build(224)(img) 
-
+    img = img.unsqueeze(0) 
+    
     input_ids = tokenizer.encode(input_texts) 
     input_ids = torch.LongTensor(input_ids).unsqueeze(0)
     eos_ids = tokenizer.eos_token_id
@@ -58,17 +61,18 @@ def generate(input_texts, image_lists, model, tokenizer, max_length, min_length,
             pixel_values=img,
             input_ids=input_ids,
         )[:, -1, :]
-        logits = logits.squeeze() 
+        # logits = logits.squeeze() 
         logits = logits / temperature 
-        if i < min_length: 
+        if i < min_length:
             logits[:, eos_ids] = -1e9 
-        lm_logits = torch.cat([top_filtering(lm_logits[j].squeeze(), top_k=generate_kwargs.top_k, top_p=generate_kwargs.top_p).unsqueeze(0) for j in range(generate_kwargs.batch_size)], dim=0)
+        lm_logits = torch.cat([top_filtering(logits[j], top_k=top_k, top_p=top_p).unsqueeze(0) for j in range(batch_size)], dim=0)
+        
         probs = F.softmax(lm_logits, dim=-1)
-        prev = torch.topk(probs, 1)[1] if generate_kwargs.no_sample else torch.multinomial(probs, 1)
+        prev = torch.topk(probs, 1)[1] if no_sample else torch.multinomial(probs, 1)
         input_ids = torch.cat([input_ids, prev.cpu()], dim=-1) 
     
     decode_result = []
-    for i in range(0, generate_kwargs.batch_size):
+    for i in range(0, batch_size):
         temp = input_ids[i, :].cpu().tolist()
         temp1 = []
         for j in temp:
@@ -82,13 +86,16 @@ def generate(input_texts, image_lists, model, tokenizer, max_length, min_length,
 
 if __name__ == "__main__": 
     input_texts = "The following is a conversation between a curious human and AI assistant."
-    image_lists = ['dog.jpg'] 
+    image_lists = ['dog.jpg']
 
-    base_model_path = 'ckpt' 
+    base_model_path = 'output' 
     model, tokenizer = get_model_and_tokenizer(base_model_path) 
-    sentence = generate(
-        input_texts, image_lists, model, tokenizer,
-        max_length=256, min_length=2, temperature=0.9, top_k=5, no_sample=False, 
-        top_p=0, batch_size=1, 
-    )
+    model = model.eval() 
+
+    with torch.no_grad():
+        sentence = generate(
+            input_texts, image_lists, model, tokenizer,
+            max_length=10, min_length=2, temperature=0.9, top_k=5, no_sample=False, 
+            top_p=0, batch_size=1, 
+        )
     print(sentence)
